@@ -1,0 +1,1036 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://code.highcharts.com/highcharts.js"></script>
+    <script src="https://code.highcharts.com/highcharts-3d.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    <title>Profile Summarizer - Your Profiles</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%); }
+        .card-dark { background: rgba(30, 41, 59, 0.85); border: 1px solid rgba(100, 116, 139, 0.3); backdrop-filter: blur(10px); }
+        .card-dark:hover { border-color: rgba(129, 140, 248, 0.4); }
+        .nav-glass { background: rgba(15, 23, 42, 0.9); border-bottom: 1px solid rgba(100, 116, 139, 0.2); backdrop-filter: blur(12px); }
+    </style>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+        import { getAuth, onAuthStateChanged, signOut }
+            from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyCJEGd_IfttPvde8DJMqM1qRxzEyaDnDEw",
+            authDomain: "profile-summarizer.firebaseapp.com",
+            projectId: "profile-summarizer",
+            storageBucket: "profile-summarizer.firebasestorage.app",
+            messagingSenderId: "912822287619",
+            appId: "1:912822287619:web:b77b2aabf1ea49801e3d36",
+            measurementId: "G-2PF2HKHG2D"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+
+        onAuthStateChanged(auth, (user) => {
+            if (!user) {
+                window.location.href = "/";
+            } else {
+                document.getElementById("welcomeMsg").innerText = user.email;
+            }
+        });
+
+        window.logOut = function() {
+            signOut(auth).then(() => {
+                window.location.href = "/";
+            });
+        };
+
+        // ---------------------------------------------------------------
+        // FIX: centralized HTML-escaping helper.
+        // Every field below that comes from a third-party API (GitHub repo
+        // names, LeetCode problem titles, Kaggle notebook/dataset titles,
+        // badge names, display names, language names, error strings, AI
+        // insight text, etc.) is untrusted input. Previously these were
+        // interpolated directly into innerHTML, which is a stored-XSS hole
+        // (e.g. a Kaggle notebook titled `<img src=x onerror=alert(1)>`
+        // would execute). Every interpolation of external/user data below
+        // is now passed through escapeHtml().
+        // ---------------------------------------------------------------
+        function escapeHtml(str) {
+            if (str === null || str === undefined) return "";
+            return String(str)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+        }
+
+        window.analyzeProfiles = function(event) {
+    event.preventDefault();
+
+    const github = document.getElementById("github").value.trim();
+    const leetcode = document.getElementById("leetcode").value.trim();
+    const kaggle = document.getElementById("kaggle").value.trim();
+
+    if (!github || !leetcode || !kaggle) {
+        document.getElementById("resultBox").innerHTML = `<div class="card-dark rounded-xl p-6"><p class="text-red-400 text-sm">⚠ Please fill in all three fields before proceeding.</p></div>`;
+        return;
+    }
+
+    document.getElementById("resultBox").innerHTML = `
+        <div class="card-dark rounded-xl p-8 text-center flex flex-col items-center justify-center mt-6">
+            <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-500 mb-4"></div>
+            <p class="text-white font-medium text-lg mb-1">Analyzing Developer Profiles</p>
+            <p class="text-sm text-slate-400">Scraping GitHub, LeetCode, Kaggle, and generating AI insights...</p>
+            <p class="text-xs text-slate-500 mt-2">This may take up to 45 seconds. Please do not close this tab.</p>
+        </div>
+    `;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+    auth.currentUser.getIdToken().then((idToken) => {
+        fetch("/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ github: github, leetcode: leetcode, kaggle: kaggle, token: idToken }),
+            signal: controller.signal
+        })
+        .then(response => {
+            clearTimeout(timeoutId);
+            if (!response.ok) {
+                throw new Error("Server error (" + response.status + ")");
+            }
+            return response.json();
+        })
+        .then(data => {
+            renderResults(data);
+            if (!data.github.error && !data.leetcode.error && !data.kaggle.error) {
+                renderChart(data);
+            }
+        })
+        .catch(error => {
+            clearTimeout(timeoutId);
+            let message = "Something went wrong. Please try again.";
+            if (error.name === "AbortError") {
+                message = "The request took too long. Please try again.";
+            }
+            // FIX: surface the real error in the console so failures inside
+            // renderResults() (e.g. a bad API shape) aren't swallowed silently.
+            console.error(error);
+            document.getElementById("resultBox").innerHTML = `<div class="card-dark rounded-xl p-6"><p class="text-red-400 text-sm">⚠ ${escapeHtml(message)}</p></div>`;
+        });
+    });
+};
+
+        let currentData = null;
+
+        function renderResults(data) {
+            currentData = data;
+            const gh = data.github;
+            const lc = data.leetcode;
+            const kg = data.kaggle;
+
+            const cardEl = document.getElementById("mainCard");
+
+            // ---------------------------------------------------------------
+            // FIX (main bug): kg.error was never checked here. If Kaggle
+            // scraping failed, execution fell through into the success path
+            // and later code did kg.notebooks.map(...) / kg.datasets.map(...)
+            // on undefined, throwing a TypeError that got swallowed by the
+            // outer .catch() as a generic "Something went wrong" message —
+            // instead of showing the actual per-field error you built the UI
+            // for. Now all three services are checked, and this is written
+            // as a loop so a future 4th platform can't reintroduce the bug.
+            // ---------------------------------------------------------------
+            const services = { GitHub: gh, LeetCode: lc, Kaggle: kg };
+            const failed = Object.entries(services).filter(([, v]) => v && v.error);
+
+            if (failed.length > 0) {
+                if (cardEl) {
+                    cardEl.classList.remove("max-w-7xl");
+                    cardEl.classList.add("max-w-md");
+                }
+                const errorMsg = failed
+                    .map(([, v]) => `<p class="text-red-400 text-sm mb-2">⚠ ${escapeHtml(v.error)}</p>`)
+                    .join("");
+                document.getElementById("resultBox").innerHTML = `<div class="card-dark rounded-xl p-6">${errorMsg}<p class="text-sm text-slate-400 mt-2">Please check the usernames and try again.</p></div>`;
+                return;
+            }
+
+            if (cardEl) {
+                cardEl.classList.remove("max-w-md");
+                cardEl.classList.add("max-w-7xl");
+            }
+
+            const ghLanguages = Object.entries(gh.languages)
+                .map(([lang, count]) => `<span class="inline-block bg-sky-900/50 text-sky-300 text-xs font-medium px-2 py-1 rounded-full mr-2 mb-2 border border-sky-700/40">${escapeHtml(lang)}: ${escapeHtml(count)}</span>`)
+                .join("");
+
+            // ---------------------------------------------------------------
+            // FIX: these .find(...).count chains threw if the LeetCode API
+            // ever omitted a difficulty bucket (no fallback existed, unlike
+            // the allQuestionsCount lines right below which already used
+            // ?. and || fallbacks). Now consistent and crash-safe.
+            // ---------------------------------------------------------------
+            const lcSolved = lc.stats.acSubmissionNum || [];
+            const lcEasy = lcSolved.find(s => s.difficulty === "Easy")?.count ?? 0;
+            const lcMedium = lcSolved.find(s => s.difficulty === "Medium")?.count ?? 0;
+            const lcHard = lcSolved.find(s => s.difficulty === "Hard")?.count ?? 0;
+            const lcTotal = lcSolved.find(s => s.difficulty === "All")?.count ?? 0;
+
+            const lcEasyTotal = lc.allQuestionsCount ? (lc.allQuestionsCount.find(q => q.difficulty === "Easy")?.count || 953) : 953;
+            const lcMediumTotal = lc.allQuestionsCount ? (lc.allQuestionsCount.find(q => q.difficulty === "Medium")?.count || 2081) : 2081;
+            const lcHardTotal = lc.allQuestionsCount ? (lc.allQuestionsCount.find(q => q.difficulty === "Hard")?.count || 951) : 951;
+            const lcTotalCount = lc.allQuestionsCount ? (lc.allQuestionsCount.find(q => q.difficulty === "All")?.count || 3985) : 3985;
+
+            const lcTotalAttempted = lc.stats.totalSubmissionNum ? (lc.stats.totalSubmissionNum.find(s => s.difficulty === "All")?.count ?? lcTotal) : lcTotal;
+            const lcAttempting = Math.max(0, lcTotalAttempted - lcTotal);
+
+            const lcBadges = lc.badges || [];
+
+            let lcSubmissionsCount = 0;
+            let lcActiveDays = 0;
+            if (lc.streak && lc.streak.submissionCalendar) {
+                Object.values(lc.streak.submissionCalendar).forEach(val => {
+                    lcSubmissionsCount += val;
+                });
+                lcActiveDays = Object.keys(lc.streak.submissionCalendar).length;
+            }
+
+            const kgNotebookRows = (kg.notebooks || []).map(n => `
+                <tr class="border-t border-slate-700/40">
+                    <td class="py-2 px-3 text-sm text-slate-300 hover:text-white transition-colors">${escapeHtml(n.title)}</td>
+                </tr>
+            `).join("");
+
+            const kgDatasetRows = (kg.datasets || []).map(d => `
+                <tr class="border-t border-slate-700/40">
+                    <td class="py-2 px-3 text-sm text-slate-300 hover:text-white transition-colors">${escapeHtml(d.title)}</td>
+                </tr>
+            `).join("");
+
+            let insightsHtml = "";
+            if (data.insights) {
+                const i = data.insights;
+                const jobs = i.jobs || [];
+                const placement = i.placement_readiness || { score: 0, reason: "No placement analysis available." };
+                const teacherTips = i.teacher_tips || [];
+                const roles = i.roles || [];
+                const strengths = i.strengths || [];
+                const roadmap = i.roadmap || [];
+                const dos = (i.dos_and_donts && i.dos_and_donts.dos) ? i.dos_and_donts.dos : [];
+                const donts = (i.dos_and_donts && i.dos_and_donts.donts) ? i.dos_and_donts.donts : [];
+
+                insightsHtml = `
+                    <div class="card-dark rounded-xl p-6 mb-6 border-t-4 border-indigo-500 shadow-2xl">
+                        <div class="flex flex-col md:flex-row justify-between items-start md:items-center border-b border-slate-700/60 pb-4 mb-6 gap-4">
+                            <div>
+                                <h3 class="text-xl font-bold text-white flex items-center gap-2">
+                                    <span>✨ AI Student Report & Career Insights</span>
+                                </h3>
+                                <p class="text-xs text-slate-400 mt-1">Generated by Google Gemini based on combined profile metrics</p>
+                            </div>
+                            <div class="flex items-center gap-3 bg-slate-800/80 px-4 py-2 rounded-lg border border-slate-700/50">
+                                <span class="text-xs font-semibold text-slate-300 uppercase tracking-wider">Placement Readiness</span>
+                                <span class="text-lg font-bold text-emerald-400">${escapeHtml(placement.score)}%</span>
+                            </div>
+                        </div>
+
+                        <!-- Placement Evaluation Reason -->
+                        <div class="mb-6 bg-slate-800/40 p-4 rounded-lg border border-slate-750/30">
+                            <h4 class="text-xs font-bold text-slate-400 uppercase tracking-wide">Readiness Evaluation</h4>
+                            <p class="text-sm text-slate-200 mt-1.5 leading-relaxed">${escapeHtml(placement.reason)}</p>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <!-- Left Column: Career & Strengths -->
+                            <div class="space-y-6">
+                                <div>
+                                    <h4 class="text-sm font-semibold text-indigo-300 uppercase tracking-wide flex items-center gap-2">
+                                        <span>💼 Target Career Roles</span>
+                                    </h4>
+                                    <div class="mt-2.5 flex flex-wrap gap-2">
+                                        ${roles.map(r => `<span class="bg-indigo-950/60 text-indigo-300 text-xs font-medium px-2.5 py-1.5 rounded-md border border-indigo-800/60">${escapeHtml(r)}</span>`).join("")}
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <h4 class="text-sm font-semibold text-emerald-400 uppercase tracking-wide flex items-center gap-2">
+                                        <span>🎯 Jobs Student Can Apply For</span>
+                                    </h4>
+                                    <div class="mt-2.5 flex flex-wrap gap-2">
+                                        ${jobs.length > 0 ? jobs.map(j => `<span class="bg-emerald-950/60 text-emerald-300 text-xs font-medium px-2.5 py-1.5 rounded-md border border-emerald-800/60">${escapeHtml(j)}</span>`).join("") : '<span class="text-xs text-slate-400">No specific jobs identified yet.</span>'}
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <h4 class="text-sm font-semibold text-sky-400 uppercase tracking-wide flex items-center gap-2">
+                                        <span>💪 Key Performance Strengths</span>
+                                    </h4>
+                                    <ul class="mt-2.5 list-disc list-inside text-sm text-slate-200 space-y-1.5">
+                                        ${strengths.map(s => `<li>${escapeHtml(s)}</li>`).join("")}
+                                    </ul>
+                                </div>
+                            </div>
+
+                            <!-- Right Column: Roadmap & Guide -->
+                            <div class="space-y-6">
+                                <div>
+                                    <h4 class="text-sm font-semibold text-amber-400 uppercase tracking-wide flex items-center gap-2">
+                                        <span>🚀 Student Training Roadmap</span>
+                                    </h4>
+                                    <ol class="mt-2.5 list-decimal list-inside text-sm text-slate-200 space-y-2">
+                                        ${roadmap.map(r => `<li>${escapeHtml(r)}</li>`).join("")}
+                                    </ol>
+                                </div>
+
+                                <!-- Do's & Don'ts -->
+                                <div class="grid grid-cols-2 gap-4 bg-slate-800/30 p-4 rounded-lg border border-slate-750/30">
+                                    <div>
+                                        <h4 class="text-xs font-bold text-emerald-400 uppercase tracking-wide mb-2">✅ Do</h4>
+                                        <ul class="list-disc list-inside text-xs text-slate-300 space-y-1">
+                                            ${dos.map(d => `<li>${escapeHtml(d)}</li>`).join("")}
+                                        </ul>
+                                    </div>
+                                    <div>
+                                        <h4 class="text-xs font-bold text-red-400 uppercase tracking-wide mb-2">❌ Don't</h4>
+                                        <ul class="list-disc list-inside text-xs text-slate-300 space-y-1">
+                                            ${donts.map(d => `<li>${escapeHtml(d)}</li>`).join("")}
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Teacher Section -->
+                        ${teacherTips.length > 0 ? `
+                        <div class="mt-6 border-l-4 border-amber-500 bg-amber-950/20 p-4 rounded-r-lg border border-slate-700/30">
+                            <h4 class="text-sm font-semibold text-amber-300 uppercase tracking-wide flex items-center gap-1.5">
+                                <span>👩‍🏫 Instructor Coaching Action Points</span>
+                            </h4>
+                            <p class="text-xs text-slate-400 mt-0.5">Key training directions to elevate this specific student</p>
+                            <ul class="mt-3 list-disc list-inside text-sm text-slate-200 space-y-1.5">
+                                ${teacherTips.map(tip => `<li>${escapeHtml(tip)}</li>`).join("")}
+                            </ul>
+                        </div>
+                        ` : ''}
+                    </div>
+            `;
+            }
+
+            // Extract profile photo and name
+            let avatarUrl = "";
+            let displayName = "";
+
+            if (gh && gh.profile && gh.profile.avatar_url) {
+                avatarUrl = gh.profile.avatar_url;
+            } else if (lc && lc.profile && lc.profile.userAvatar) {
+                avatarUrl = lc.profile.userAvatar;
+            }
+
+            if (gh && gh.profile && gh.profile.name) {
+                displayName = gh.profile.name;
+            } else if (lc && lc.profile && lc.profile.realName) {
+                displayName = lc.profile.realName;
+            } else if (gh && gh.profile) {
+                displayName = gh.profile.login;
+            } else if (lc) {
+                displayName = lc.username;
+            } else if (kg) {
+                displayName = kg.username;
+            }
+
+            // FIX: avatarUrl is only ever used as an <img src>, so it isn't
+            // HTML-escaped (escaping would corrupt the URL). displayName IS
+            // rendered as text/HTML content, so it must be escaped.
+            const profileHeaderHtml = `
+                <div class="card-dark rounded-xl p-6 mb-6 flex flex-col sm:flex-row items-center gap-6 shadow-xl border-l-4 border-indigo-500">
+                    ${avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="Avatar" class="w-20 h-20 rounded-full border-2 border-indigo-500 shadow-md object-cover">` : `
+                    <div class="w-20 h-20 rounded-full bg-slate-700 flex items-center justify-center border-2 border-indigo-500 text-slate-300 font-bold text-2xl uppercase">
+                        ${displayName ? escapeHtml(displayName.charAt(0)) : '?'}
+                    </div>
+                    `}
+                    <div class="text-center sm:text-left">
+                        <h2 class="text-2xl font-bold text-white">${escapeHtml(displayName || 'Student Profile')}</h2>
+                        <div class="flex flex-wrap justify-center sm:justify-start gap-4 mt-2 text-sm text-slate-400">
+                            ${gh ? `<span class="flex items-center gap-1.5"><svg class="w-4 h-4 text-sky-400" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>${escapeHtml(gh.username)}</span>` : ''}
+                            ${lc ? `<span class="flex items-center gap-1.5"><svg class="w-4 h-4 text-amber-500" fill="currentColor" viewBox="0 0 24 24"><path d="M13.483 0a1.374 1.374 0 0 0-.961.414l-9.777 9.778a1.38 1.38 0 0 0 0 1.95l8.802 8.802a1.38 1.38 0 0 0 1.95 0l9.777-9.777a1.38 1.38 0 0 0 0-1.95l-8.802-8.802a1.38 1.38 0 0 0-.991-.415zm.083 2.481l7.302 7.303-8.802 8.802-7.302-7.303 8.802-8.802z"/></svg>${escapeHtml(lc.username)}</span>` : ''}
+                            ${kg ? `<span class="flex items-center gap-1.5"><span class="text-xs font-bold text-indigo-400 font-mono">K</span>${escapeHtml(kg.username)}</span>` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            const html = `
+                ${profileHeaderHtml}
+                ${insightsHtml}
+                
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                    <div class="card-dark rounded-xl p-6">
+                        <div class="flex justify-between items-center cursor-pointer" onclick="toggleSection('ghDetails')">
+                            <h3 class="text-lg font-bold text-white">🐙 GitHub — ${escapeHtml(gh.username)}</h3>
+                            <span class="text-indigo-400 text-sm font-medium">View Details ▾</span>
+                        </div>
+                        <p class="text-sm text-slate-300 mt-3 mb-1"><strong>${escapeHtml(gh.profile.name || "N/A")}</strong></p>
+                        <!-- 3D Chart Container -->
+                        <div id="ghChart" style="height: 180px;" class="mt-4 mb-2"></div>
+                        <div class="mb-3">${ghLanguages}</div>
+
+                        <div id="ghDetails" class="hidden mt-4">
+                            <div class="flex gap-3 mb-3">
+                                <select id="ghSort" onchange="rerenderGithubTable()" class="text-sm bg-slate-800 border border-slate-600 text-slate-200 rounded-lg px-3 py-1.5">
+                                    <option value="date">Sort by: Last Updated</option>
+                                    <option value="language">Sort by: Language</option>
+                                </select>
+                            </div>
+                            <table class="w-full text-left">
+                                <thead>
+                                    <tr class="text-xs text-slate-400 uppercase">
+                                        <th class="py-2 px-3">Repo</th>
+                                        <th class="py-2 px-3">Language</th>
+                                        <th class="py-2 px-3">Last Updated</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="ghTableBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="card-dark rounded-xl p-6">
+                        <div class="flex justify-between items-center cursor-pointer" onclick="toggleSection('kgDetails')">
+                            <h3 class="text-lg font-bold text-white">📊 Kaggle — ${escapeHtml(kg.username)}</h3>
+                            <span class="text-indigo-400 text-sm font-medium">View Details ▾</span>
+                        </div>
+                        <p class="text-sm text-slate-400 mt-3">${escapeHtml(kg.notebook_count)} notebooks • ${escapeHtml(kg.dataset_count)} datasets</p>
+                        <!-- 3D Chart Container -->
+                        <div id="kgChart" style="height: 180px;" class="mt-4 mb-2"></div>
+
+                        <div id="kgDetails" class="hidden mt-4">
+                            <p class="text-xs text-slate-400 uppercase mb-2 px-3">Notebooks</p>
+                            <table class="w-full text-left mb-4">
+                                <tbody>${kgNotebookRows}</tbody>
+                            </table>
+                            <p class="text-xs text-slate-400 uppercase mb-2 px-3">Datasets</p>
+                            <table class="w-full text-left">
+                                <tbody>${kgDatasetRows}</tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- LeetCode Card (Full Width) -->
+                <div class="grid grid-cols-1 gap-6 mb-6">
+                    <div class="card-dark rounded-xl p-6">
+                        <div class="flex justify-between items-center cursor-pointer mb-6" onclick="toggleSection('lcDetails')">
+                            <h3 class="text-lg font-bold text-white flex items-center gap-2">
+                                <span>💻 LeetCode — ${escapeHtml(lc.username)}</span>
+                            </h3>
+                            <span class="text-indigo-400 text-sm font-medium">View Solved Problems ▾</span>
+                        </div>
+
+                        <!-- Redesigned Grid: Ring Progress & Badges -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                            <!-- Left: Progress Ring + Stat Boxes -->
+                            <div class="bg-slate-900/40 p-5 rounded-xl border border-slate-700/30 flex flex-col sm:flex-row items-center justify-around gap-6">
+                                <!-- Circular Gauge Container -->
+                                <div id="lcProgressRing" style="width: 150px; height: 150px; position: relative;"></div>
+                                
+                                <!-- Easy/Medium/Hard Cards -->
+                                <div class="flex flex-col gap-3 w-full max-w-[180px]">
+                                    <div class="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/40 text-center">
+                                        <span class="text-xs font-semibold text-emerald-400 block uppercase tracking-wide">Easy</span>
+                                        <span class="text-sm font-bold text-white">${lcEasy}/${lcEasyTotal}</span>
+                                    </div>
+                                    <div class="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/40 text-center">
+                                        <span class="text-xs font-semibold text-amber-400 block uppercase tracking-wide">Medium</span>
+                                        <span class="text-sm font-bold text-white">${lcMedium}/${lcMediumTotal}</span>
+                                    </div>
+                                    <div class="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700/40 text-center">
+                                        <span class="text-xs font-semibold text-red-400 block uppercase tracking-wide">Hard</span>
+                                        <span class="text-sm font-bold text-white">${lcHard}/${lcHardTotal}</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Right: Badges Box -->
+                            <div class="bg-slate-900/40 p-5 rounded-xl border border-slate-700/30 flex flex-col justify-between">
+                                <div>
+                                    <p class="text-xs text-slate-400 uppercase tracking-wider font-semibold">Badges</p>
+                                    <p class="text-3xl font-extrabold text-white mt-1">${lcBadges.length}</p>
+                                    
+                                    <!-- Row of Badges -->
+                                    <div class="flex gap-3 mt-3 overflow-x-auto py-1">
+                                        ${lcBadges.length > 0 ? lcBadges.map(b => `<img src="${escapeHtml(b.icon)}" alt="${escapeHtml(b.name)}" class="w-12 h-12 object-contain hover:scale-110 transition-transform" title="${escapeHtml(b.name)}">`).join("") : '<span class="text-xs text-slate-500 mt-2 block">No badges earned yet.</span>'}
+                                    </div>
+                                </div>
+                                <div class="mt-4 pt-3 border-t border-slate-800/60">
+                                    <p class="text-xs text-slate-400 uppercase tracking-wider font-semibold">Most Recent Badge</p>
+                                    <p class="text-sm font-semibold text-indigo-300 mt-1">${lcBadges.length > 0 ? escapeHtml(lcBadges[0].name) : 'N/A'}</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Calendar Grid -->
+                        <div class="bg-slate-900/40 p-5 rounded-xl border border-slate-700/30">
+                            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4">
+                                <p class="text-sm font-semibold text-slate-200">
+                                    <span class="text-indigo-400 text-lg font-bold mr-1">${lcSubmissionsCount}</span> submissions in the past one year
+                                </p>
+                                <div class="flex gap-4 text-xs text-slate-400 mt-1 sm:mt-0">
+                                    <span>Total active days: <strong class="text-slate-200">${lcActiveDays}</strong></span>
+                                    <span>Max streak: <strong class="text-slate-200">${escapeHtml(lc.streak.max_streak)}</strong></span>
+                                </div>
+                            </div>
+                            
+                            <div id="lcCalendarGrid" class="grid grid-flow-col grid-rows-7 gap-[2.5px] overflow-x-auto justify-start py-2 px-3 bg-slate-950/40 rounded border border-slate-850" style="max-height: 96px;"></div>
+                            
+                            <!-- Month Labels -->
+                            <div class="flex justify-between text-[10px] text-slate-500 px-3 mt-2 font-medium">
+                                <span>Jul</span><span>Aug</span><span>Sep</span><span>Oct</span><span>Nov</span><span>Dec</span><span>Jan</span><span>Feb</span><span>Mar</span><span>Apr</span><span>May</span><span>Jun</span>
+                            </div>
+                        </div>
+
+                        <!-- Hidden Problems Table -->
+                        <div id="lcDetails" class="hidden mt-6 bg-slate-900/20 p-4 rounded-xl border border-slate-700/20">
+                            <div class="flex gap-3 mb-4">
+                                <select id="lcSort" onchange="rerenderLeetcodeTable()" class="text-sm bg-slate-800 border border-slate-600 text-slate-200 rounded-lg px-3 py-1.5">
+                                    <option value="date">Sort by: Date Solved</option>
+                                    <option value="topic">Sort by: Topic</option>
+                                </select>
+                                <select id="lcFilterTopic" onchange="rerenderLeetcodeTable()" class="text-sm bg-slate-800 border border-slate-600 text-slate-200 rounded-lg px-3 py-1.5">
+                                    <option value="">All Topics</option>
+                                </select>
+                            </div>
+                            <table class="w-full text-left">
+                                <thead>
+                                    <tr class="text-xs text-slate-400 uppercase">
+                                        <th class="py-2 px-3">Problem</th>
+                                        <th class="py-2 px-3">Topics</th>
+                                        <th class="py-2 px-3">Solved On</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="lcTableBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card-dark rounded-xl p-6 mb-6">
+                    <h3 class="text-lg font-bold text-white mb-3">📈 Overall Balance</h3>
+                    <div id="performanceChart" style="height: 400px;"></div>
+                </div>
+                <div class="text-center mt-6">
+                    <button onclick="downloadReport()"
+                        class="bg-indigo-600 text-white font-semibold px-6 py-3 rounded-lg hover:bg-indigo-700 transition shadow-lg">
+                        ⬇ Download Report
+                    </button>
+                </div>
+            `;
+
+            document.getElementById("resultBox").innerHTML = html;
+            rerenderGithubTable();
+            rerenderLeetcodeTable();
+            populateTopicFilter();
+        }
+
+        window.downloadReport = function() {
+            const btn = document.querySelector("#resultBox button");
+            const selects = document.querySelectorAll("#resultBox select");
+            const viewDetailsBtns = document.querySelectorAll("#resultBox span.text-indigo-400");
+            
+            if (btn) btn.style.display = "none";
+            selects.forEach(s => s.style.display = "none");
+            viewDetailsBtns.forEach(b => b.style.display = "none");
+
+            const element = document.getElementById("resultBox");
+            const opt = {
+                margin:       [10, 10, 10, 10],
+                filename:     `Career_Report_${currentData ? currentData.github.username : 'Student'}.pdf`,
+                image:        { type: 'jpeg', quality: 0.98 },
+                html2canvas:  { scale: 2, useCORS: true, backgroundColor: '#0f172a' },
+                jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' }
+            };
+
+            html2pdf().set(opt).from(element).save().then(() => {
+                if (btn) btn.style.display = "inline-block";
+                selects.forEach(s => s.style.display = "inline-block");
+                viewDetailsBtns.forEach(b => b.style.display = "inline-block");
+            }).catch(err => {
+                console.error(err);
+                if (btn) btn.style.display = "inline-block";
+                selects.forEach(s => s.style.display = "inline-block");
+                viewDetailsBtns.forEach(b => b.style.display = "inline-block");
+            });
+        };
+
+        window.rerenderGithubTable = function() {
+            const sortBy = document.getElementById("ghSort").value;
+            let repos = [...currentData.github.repos];
+
+            if (sortBy === "date") {
+                repos.sort((a, b) => new Date(b.pushed_at || 0) - new Date(a.pushed_at || 0));
+            } else if (sortBy === "language") {
+                repos.sort((a, b) => (a.language || "zzz").localeCompare(b.language || "zzz"));
+            }
+
+            const rows = repos.map(r => `
+                <tr class="border-t border-slate-700/40">
+                    <td class="py-2 px-3 text-sm text-slate-300 hover:text-white transition-colors">${escapeHtml(r.name)}</td>
+                    <td class="py-2 px-3 text-sm text-slate-400">${escapeHtml(r.language || "—")}</td>
+                    <td class="py-2 px-3 text-sm text-slate-400">${r.pushed_at ? escapeHtml(r.pushed_at.split("T")[0]) : "—"}</td>
+                </tr>
+            `).join("");
+
+            document.getElementById("ghTableBody").innerHTML = rows;
+        };
+
+        window.populateTopicFilter = function() {
+            const allTopics = new Set();
+            currentData.leetcode.recent_solved_problems.forEach(p => {
+                p.topics.forEach(t => allTopics.add(t));
+            });
+
+            const select = document.getElementById("lcFilterTopic");
+            const options = ['<option value="">All Topics</option>']
+                .concat([...allTopics].sort().map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`));
+            select.innerHTML = options.join("");
+        };
+
+        window.rerenderLeetcodeTable = function() {
+            const sortBy = document.getElementById("lcSort").value;
+            const filterTopic = document.getElementById("lcFilterTopic").value;
+
+            let problems = [...currentData.leetcode.recent_solved_problems];
+
+            if (filterTopic) {
+                problems = problems.filter(p => p.topics.includes(filterTopic));
+            }
+
+            if (sortBy === "date") {
+                problems.sort((a, b) => b.timestamp - a.timestamp);
+            } else if (sortBy === "topic") {
+                problems.sort((a, b) => (a.topics[0] || "zzz").localeCompare(b.topics[0] || "zzz"));
+            }
+
+            const rows = problems.map(p => `
+                <tr class="border-t border-slate-700/40">
+                    <td class="py-2 px-3 text-sm text-slate-300 hover:text-white transition-colors">${escapeHtml(p.title)}</td>
+                    <td class="py-2 px-3 text-sm text-slate-400">${p.topics.length ? escapeHtml(p.topics.join(", ")) : "—"}</td>
+                    <td class="py-2 px-3 text-sm text-slate-400">${new Date(p.timestamp * 1000).toISOString().split("T")[0]}</td>
+                </tr>
+            `).join("");
+
+            document.getElementById("lcTableBody").innerHTML = rows || `<tr><td class="py-2 px-3 text-sm text-gray-400" colspan="3">No problems match this filter</td></tr>`;
+        };
+
+        function renderGithubChart(data) {
+            const languages = Object.entries(data.github.languages || {});
+            languages.sort((a, b) => b[1] - a[1]);
+            const topLangs = languages.slice(0, 5);
+
+            Highcharts.chart('ghChart', {
+                chart: {
+                    type: 'column',
+                    backgroundColor: 'transparent',
+                    options3d: {
+                        enabled: true,
+                        alpha: 15,
+                        beta: 15,
+                        depth: 40,
+                        viewDistance: 25
+                    }
+                },
+                title: { text: null },
+                credits: { enabled: false },
+                xAxis: {
+                    categories: topLangs.map(l => l[0]),
+                    labels: {
+                        style: { color: '#94a3b8', fontSize: '10px' }
+                    },
+                    gridLineColor: 'transparent',
+                    lineColor: 'rgba(100, 116, 139, 0.2)'
+                },
+                yAxis: {
+                    title: { text: null },
+                    labels: {
+                        enabled: false
+                    },
+                    gridLineColor: 'rgba(100, 116, 139, 0.1)'
+                },
+                tooltip: {
+                    backgroundColor: 'rgba(15, 23, 42, 0.9)',
+                    borderColor: '#818cf8',
+                    style: { color: '#e2e8f0' },
+                    formatter: function() {
+                        return `<b>${this.x}</b>: ${this.y} repos`;
+                    }
+                },
+                plotOptions: {
+                    column: {
+                        depth: 25,
+                        colorByPoint: true,
+                        colors: ['#6366f1', '#3b82f6', '#10b981', '#f59e0b', '#ec4899'],
+                        dataLabels: {
+                            enabled: true,
+                            format: '{y}',
+                            style: { color: '#e2e8f0', textOutline: 'none', fontSize: '10px' }
+                        }
+                    }
+                },
+                series: [{
+                    name: 'Repositories',
+                    data: topLangs.map(l => l[1]),
+                    showInLegend: false
+                }]
+            });
+        }
+
+        function renderLeetcodeChart(data) {
+            const lc = data.leetcode;
+            const lcSolved = lc.stats.acSubmissionNum || [];
+            const lcEasy = lcSolved.find(s => s.difficulty === "Easy")?.count ?? 0;
+            const lcMedium = lcSolved.find(s => s.difficulty === "Medium")?.count ?? 0;
+            const lcHard = lcSolved.find(s => s.difficulty === "Hard")?.count ?? 0;
+            const lcTotal = lcSolved.find(s => s.difficulty === "All")?.count ?? 0;
+
+            const lcTotalCount = lc.allQuestionsCount ? (lc.allQuestionsCount.find(q => q.difficulty === "All")?.count || 3985) : 3985;
+            const lcTotalAttempted = lc.stats.totalSubmissionNum ? (lc.stats.totalSubmissionNum.find(s => s.difficulty === "All")?.count ?? lcTotal) : lcTotal;
+            const lcAttempting = Math.max(0, lcTotalAttempted - lcTotal);
+            const remaining = Math.max(0, lcTotalCount - lcTotal);
+
+            Highcharts.chart('lcProgressRing', {
+                chart: {
+                    type: 'pie',
+                    backgroundColor: 'transparent',
+                    margin: [0, 0, 0, 0],
+                    spacing: [0, 0, 0, 0]
+                },
+                title: {
+                    text: `
+                        <div style="text-align: center; line-height: 1.25; font-family: sans-serif;">
+                            <span style="font-size: 20px; color: #ffffff; font-weight: 800;">${lcTotal}</span><span style="font-size: 11px; color: #64748b; font-weight: 600;">/${lcTotalCount}</span>
+                            <br>
+                            <span style="font-size: 10px; color: #10b981; font-weight: 600; text-transform: uppercase;">✓ Solved</span>
+                            <br>
+                            <span style="font-size: 9px; color: #94a3b8; font-weight: 500; display: inline-block; margin-top: 1px;">${lcAttempting} Attempting</span>
+                        </div>
+                    `,
+                    align: 'center',
+                    verticalAlign: 'middle',
+                    useHTML: true,
+                    y: 2
+                },
+                credits: { enabled: false },
+                tooltip: {
+                    backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                    borderColor: '#818cf8',
+                    style: { color: '#e2e8f0', fontSize: '11px' },
+                    headerFormat: '',
+                    pointFormat: '<b>{point.name}</b>: <b>{point.y}</b> ({point.percentage:.1f}%)'
+                },
+                plotOptions: {
+                    pie: {
+                        innerSize: '82%',
+                        borderWidth: 0,
+                        dataLabels: { enabled: false },
+                        states: {
+                            hover: {
+                                halo: { size: 5 }
+                            }
+                        }
+                    }
+                },
+                series: [{
+                    name: 'Solved Summary',
+                    data: [
+                        { name: 'Easy Solved', y: lcEasy, color: '#10b981' },
+                        { name: 'Medium Solved', y: lcMedium, color: '#f59e0b' },
+                        { name: 'Hard Solved', y: lcHard, color: '#ef4444' },
+                        { name: 'Unsolved', y: remaining, color: 'rgba(51, 65, 85, 0.45)' }
+                    ]
+                }]
+            });
+        }
+
+        function renderKaggleChart(data) {
+            const kg = data.kaggle;
+            const notebooks = kg.notebook_count || 0;
+            const datasets = kg.dataset_count || 0;
+
+            Highcharts.chart('kgChart', {
+                chart: {
+                    type: 'column',
+                    backgroundColor: 'transparent',
+                    options3d: {
+                        enabled: true,
+                        alpha: 15,
+                        beta: 15,
+                        depth: 40,
+                        viewDistance: 25
+                    }
+                },
+                title: { text: null },
+                credits: { enabled: false },
+                xAxis: {
+                    categories: ['Notebooks', 'Datasets'],
+                    labels: {
+                        style: { color: '#94a3b8', fontSize: '10px' }
+                    },
+                    gridLineColor: 'transparent',
+                    lineColor: 'rgba(100, 116, 139, 0.2)'
+                },
+                yAxis: {
+                    title: { text: null },
+                    labels: { enabled: false },
+                    gridLineColor: 'rgba(100, 116, 139, 0.1)'
+                },
+                tooltip: {
+                    backgroundColor: 'rgba(15, 23, 42, 0.9)',
+                    borderColor: '#818cf8',
+                    style: { color: '#e2e8f0' },
+                    formatter: function() {
+                        return `<b>${this.x}</b>: ${this.y}`;
+                    }
+                },
+                plotOptions: {
+                    column: {
+                        depth: 25,
+                        colorByPoint: true,
+                        colors: ['#a855f7', '#06b6d4'],
+                        dataLabels: {
+                            enabled: true,
+                            format: '{y}',
+                            style: { color: '#e2e8f0', textOutline: 'none', fontSize: '10px' }
+                        }
+                    }
+                },
+                series: [{
+                    name: 'Kaggle Contributions',
+                    data: [notebooks, datasets],
+                    showInLegend: false
+                }]
+            });
+        }
+
+        function renderLeetcodeCalendar(calendar) {
+            const container = document.getElementById("lcCalendarGrid");
+            if (!container) return;
+            container.innerHTML = "";
+
+            const activeDates = {};
+            if (calendar) {
+                Object.entries(calendar).forEach(([timestamp, count]) => {
+                    const date = new Date(parseInt(timestamp) * 1000);
+                    const dateStr = date.getFullYear() + '-' + 
+                                    String(date.getMonth() + 1).padStart(2, '0') + '-' + 
+                                    String(date.getDate()).padStart(2, '0');
+                    activeDates[dateStr] = (activeDates[dateStr] || 0) + count;
+                });
+            }
+
+            const today = new Date();
+            const days = [];
+            const totalDays = 371; 
+            for (let i = totalDays - 1; i >= 0; i--) {
+                const d = new Date();
+                d.setDate(today.getDate() - i);
+                days.push(d);
+            }
+
+            days.forEach(d => {
+                const dateStr = d.getFullYear() + '-' + 
+                                String(d.getMonth() + 1).padStart(2, '0') + '-' + 
+                                String(d.getDate()).padStart(2, '0');
+                const count = activeDates[dateStr] || 0;
+                
+                let colorClass = "bg-slate-800/50";
+                if (count > 0 && count <= 2) colorClass = "bg-emerald-900/80";
+                else if (count > 2 && count <= 5) colorClass = "bg-emerald-700/90";
+                else if (count > 5 && count <= 8) colorClass = "bg-emerald-500";
+                else if (count > 8) colorClass = "bg-emerald-400";
+
+                const tooltip = `${dateStr}: ${count} submission${count === 1 ? '' : 's'}`;
+                const box = document.createElement("div");
+                box.className = `${colorClass} w-2.5 h-2.5 rounded-[1.5px] transition-all hover:scale-125 cursor-pointer`;
+                box.title = tooltip;
+                container.appendChild(box);
+            });
+        }
+
+        function renderChart(data) {
+            renderGithubChart(data);
+            renderLeetcodeChart(data);
+            renderKaggleChart(data);
+            renderLeetcodeCalendar(data.leetcode.streak.submissionCalendar);
+            const gh = data.github;
+            const lc = data.leetcode;
+            const kg = data.kaggle;
+
+            const lcTotal = (lc.stats.acSubmissionNum || []).find(s => s.difficulty === "All")?.count ?? 0;
+
+            const pieData = [
+                { name: "GitHub Repos", y: gh.profile.public_repos, rawLabel: "public repos" },
+                { name: "GitHub Languages", y: Object.keys(gh.languages).length, rawLabel: "languages used" },
+                { name: "LeetCode Solved", y: lcTotal, rawLabel: "problems solved" },
+                { name: "LeetCode Max Streak", y: lc.streak.max_streak, rawLabel: "day max streak" },
+                { name: "Kaggle Notebooks", y: kg.notebook_count, rawLabel: "notebooks" },
+                { name: "Kaggle Datasets", y: kg.dataset_count, rawLabel: "datasets" }
+            ];
+
+            Highcharts.chart('performanceChart', {
+                chart: {
+                    type: 'pie',
+                    backgroundColor: 'transparent',
+                    options3d: {
+                        enabled: true,
+                        alpha: 55,
+                        beta: 0
+                    }
+                },
+                title: { text: null },
+                credits: { enabled: false },
+                tooltip: {
+                    backgroundColor: 'rgba(15, 23, 42, 0.9)',
+                    borderColor: '#6366f1',
+                    style: { color: '#e2e8f0' },
+                    formatter: function() {
+                        return `<b>${this.point.y} ${this.point.rawLabel}</b>`;
+                    }
+                },
+                plotOptions: {
+                    pie: {
+                        innerSize: 0,
+                        depth: 45,
+                        dataLabels: {
+                            enabled: true,
+                            format: '{point.name}',
+                            style: { color: '#e2e8f0', textOutline: 'none', fontWeight: '500' }
+                        },
+                        point: {
+                            events: {
+                                click: function() {
+                                    this.slice();
+                                }
+                            }
+                        }
+                    }
+                },
+                series: [{
+                    name: 'Metrics',
+                    colorByPoint: true,
+                    data: pieData
+                }]
+            });
+        }
+
+        window.toggleSection = function(id) {
+            const el = document.getElementById(id);
+            el.classList.toggle("hidden");
+        };
+
+        window.loadHistory = function() {
+            auth.currentUser.getIdToken().then((idToken) => {
+                fetch("/history", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ token: idToken })
+                })
+                .then(response => response.json())
+                .then(reports => {
+                    renderHistoryList(reports);
+                    document.getElementById("historyModal").classList.remove("hidden");
+                });
+            });
+        };
+
+        window.closeHistory = function() {
+            document.getElementById("historyModal").classList.add("hidden");
+        };
+
+        function renderHistoryList(reports) {
+            if (reports.length === 0) {
+                document.getElementById("historyList").innerHTML = "<p class='text-sm text-slate-400'>No past reports yet.</p>";
+                return;
+            }
+
+            const rows = reports.map((r, i) => {
+                const gh = r.data.github;
+                const lc = r.data.leetcode;
+                const date = r.created_at ? new Date(r.created_at).toLocaleString() : "Unknown date";
+                return `
+                    <div class="border-b border-slate-700 py-3 cursor-pointer hover:bg-slate-700/50 px-2 rounded" onclick='openHistoryReport(${i})'>
+                        <p class="text-sm font-medium text-white">${escapeHtml(gh.username)} • ${escapeHtml(lc.username)}</p>
+                        <p class="text-xs text-slate-400">${escapeHtml(date)}</p>
+                    </div>
+                `;
+            }).join("");
+
+            document.getElementById("historyList").innerHTML = rows;
+            window.historyReports = reports;
+        }
+
+        window.openHistoryReport = function(index) {
+            const report = window.historyReports[index];
+            closeHistory();
+            renderResults(report.data);
+            renderChart(report.data);
+        };
+    </script>
+</head>
+<body class="min-h-screen text-gray-100">
+    <nav class="nav-glass px-6 py-4 flex justify-between items-center sticky top-0 z-50">
+        <h1 class="text-lg font-bold text-white">Profile Summarizer</h1>
+        <div class="flex items-center gap-4">
+            <span id="welcomeMsg" class="text-sm text-slate-300"></span>
+            <button onclick="loadHistory()"
+                class="text-sm bg-slate-700 text-slate-200 font-medium px-4 py-2 rounded-lg hover:bg-slate-600 transition">
+                📜 History
+            </button>
+            <button onclick="logOut()"
+                class="text-sm bg-slate-700 text-slate-200 font-medium px-4 py-2 rounded-lg hover:bg-slate-600 transition">
+                Log Out
+            </button>
+        </div>
+    </nav>
+
+    <main class="flex items-center justify-center py-12 px-4">
+        <div id="mainCard" class="card-dark rounded-2xl p-8 w-full max-w-md shadow-2xl transition-all duration-500">
+            <h2 class="text-xl font-bold text-white mb-1">Enter Your Profiles</h2>
+            <p class="text-sm text-slate-400 mb-6">Paste a username or full profile URL for each platform</p>
+
+            <form onsubmit="analyzeProfiles(event)">
+                <label class="block text-sm font-medium text-slate-300 mb-1">GitHub</label>
+                <input type="text" id="github" name="github" placeholder="username or github.com/username"
+                    class="w-full bg-slate-800 border border-slate-600 text-white placeholder-slate-500 rounded-lg px-4 py-2 mb-4 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+
+                <label class="block text-sm font-medium text-slate-300 mb-1">LeetCode</label>
+                <input type="text" id="leetcode" name="leetcode" placeholder="username or leetcode.com/u/username"
+                    class="w-full bg-slate-800 border border-slate-600 text-white placeholder-slate-500 rounded-lg px-4 py-2 mb-4 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+
+                <label class="block text-sm font-medium text-slate-300 mb-1">Kaggle</label>
+                <input type="text" id="kaggle" name="kaggle" placeholder="username or kaggle.com/username"
+                    class="w-full bg-slate-800 border border-slate-600 text-white placeholder-slate-500 rounded-lg px-4 py-2 mb-6 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+
+                <button type="submit"
+                    class="w-full bg-indigo-600 text-white font-semibold py-2.5 rounded-lg hover:bg-indigo-700 transition">
+                    Proceed
+                </button>
+            </form>
+
+            <div id="resultBox" class="mt-6"></div>
+        </div>
+    </main>
+
+    <div id="historyModal" class="hidden fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-50">
+        <div class="card-dark rounded-2xl shadow-2xl p-6 w-full max-w-lg max-h-[80vh] overflow-y-auto">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold text-white">Your Past Reports</h3>
+                <button onclick="closeHistory()" class="text-slate-400 hover:text-white">✕</button>
+            </div>
+            <div id="historyList"></div>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Profile Summarizer - Login</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword }
+            from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyCJEGd_IfttPvde8DJMqM1qRxzEyaDnDEw",
+            authDomain: "profile-summarizer.firebaseapp.com",
+            projectId: "profile-summarizer",
+            storageBucket: "profile-summarizer.firebasestorage.app",
+            messagingSenderId: "912822287619",
+            appId: "1:912822287619:web:b77b2aabf1ea49801e3d36",
+            measurementId: "G-2PF2HKHG2D"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+
+        function friendlyAuthError(error) {
+            const code = error.code || "";
+            if (code.includes("email-already-in-use")) {
+                return "That email is already registered. Try logging in instead.";
+            }
+            if (code.includes("invalid-email")) {
+                return "That doesn't look like a valid email address.";
+            }
+            if (code.includes("weak-password")) {
+                return "Password must be at least 6 characters.";
+            }
+            if (code.includes("user-not-found") || code.includes("wrong-password") || code.includes("invalid-credential")) {
+                return "Incorrect email or password.";
+            }
+            if (code.includes("too-many-requests")) {
+                return "Too many attempts. Please wait a moment and try again.";
+            }
+            return "Something went wrong. Please try again.";
+        }
+
+        window.signUp = function() {
+            const email = document.getElementById("email").value;
+            const password = document.getElementById("password").value;
+            createUserWithEmailAndPassword(auth, email, password)
+                .then(() => { window.location.href = "/profiles"; })
+                .catch((error) => {
+                    document.getElementById("authStatus").innerText = friendlyAuthError(error);
+                });
+        };
+
+        window.logIn = function() {
+            const email = document.getElementById("email").value;
+            const password = document.getElementById("password").value;
+            signInWithEmailAndPassword(auth, email, password)
+                .then(() => { window.location.href = "/profiles"; })
+                .catch((error) => {
+                    document.getElementById("authStatus").innerText = friendlyAuthError(error);
+                });
+        };
+    </script>
+</head>
+<body class="bg-gray-50 min-h-screen flex items-center justify-center">
+    <div class="bg-white shadow-lg rounded-2xl p-8 w-full max-w-sm">
+        <h1 class="text-2xl font-bold text-gray-800 text-center mb-1">Profile Summarizer</h1>
+        <p class="text-sm text-gray-500 text-center mb-6">Log in or create an account</p>
+
+        <input type="email" id="email" placeholder="Email"
+            class="w-full border border-gray-300 rounded-lg px-4 py-2 mb-3 focus:outline-none focus:ring-2 focus:ring-blue-500">
+
+        <input type="password" id="password" placeholder="Password"
+            class="w-full border border-gray-300 rounded-lg px-4 py-2 mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500">
+
+        <div class="flex gap-3">
+            <button onclick="signUp()"
+                class="flex-1 bg-gray-100 text-gray-700 font-medium py-2 rounded-lg hover:bg-gray-200 transition">
+                Sign Up
+            </button>
+            <button onclick="logIn()"
+                class="flex-1 bg-blue-600 text-white font-medium py-2 rounded-lg hover:bg-blue-700 transition">
+                Log In
+            </button>
+        </div>
+
+        <p id="authStatus" class="text-sm text-red-500 text-center mt-4"></p>
+    </div>
+</body>
+</html>
