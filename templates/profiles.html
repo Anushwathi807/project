@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://code.highcharts.com/highcharts.js"></script>
+    <script src="https://code.highcharts.com/highcharts-3d.js"></script>
+    <title>Profile Summarizer - Your Profiles</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+        import { getAuth, onAuthStateChanged, signOut }
+            from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyCJEGd_IfttPvde8DJMqM1qRxzEyaDnDEw",
+            authDomain: "profile-summarizer.firebaseapp.com",
+            projectId: "profile-summarizer",
+            storageBucket: "profile-summarizer.firebasestorage.app",
+            messagingSenderId: "912822287619",
+            appId: "1:912822287619:web:b77b2aabf1ea49801e3d36",
+            measurementId: "G-2PF2HKHG2D"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+
+        onAuthStateChanged(auth, (user) => {
+            if (!user) {
+                window.location.href = "/";
+            } else {
+                document.getElementById("welcomeMsg").innerText = user.email;
+            }
+        });
+
+        window.logOut = function() {
+            signOut(auth).then(() => {
+                window.location.href = "/";
+            });
+        };
+
+        window.analyzeProfiles = function(event) {
+    event.preventDefault();
+
+    const github = document.getElementById("github").value.trim();
+    const leetcode = document.getElementById("leetcode").value.trim();
+    const kaggle = document.getElementById("kaggle").value.trim();
+
+    if (!github || !leetcode || !kaggle) {
+        document.getElementById("resultBox").innerHTML = `<div class="bg-white shadow rounded-xl p-6"><p class="text-red-600 text-sm">⚠ Please fill in all three fields before proceeding.</p></div>`;
+        return;
+    }
+
+    document.getElementById("resultBox").innerHTML = "<p class='text-gray-500'>Loading...</p>";
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+    auth.currentUser.getIdToken().then((idToken) => {
+        fetch("/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ github: github, leetcode: leetcode, kaggle: kaggle, token: idToken }),
+            signal: controller.signal
+        })
+        .then(response => {
+            clearTimeout(timeoutId);
+            if (!response.ok) {
+                throw new Error("Server error (" + response.status + ")");
+            }
+            return response.json();
+        })
+        .then(data => {
+            renderResults(data);
+            if (!data.github.error && !data.leetcode.error) {
+                renderChart(data);
+            }
+        })
+        .catch(error => {
+            clearTimeout(timeoutId);
+            let message = "Something went wrong. Please try again.";
+            if (error.name === "AbortError") {
+                message = "The request took too long. Please try again.";
+            }
+            document.getElementById("resultBox").innerHTML = `<div class="bg-white shadow rounded-xl p-6"><p class="text-red-600 text-sm">⚠ ${message}</p></div>`;
+        });
+    });
+};
+
+        let currentData = null;
+
+        function renderResults(data) {
+            currentData = data;
+            const gh = data.github;
+            const lc = data.leetcode;
+            const kg = data.kaggle;
+
+            if (gh.error || lc.error) {
+        let errorMsg = "";
+        if (gh.error) errorMsg += `<p class="text-red-600 text-sm mb-2">⚠ ${gh.error}</p>`;
+        if (lc.error) errorMsg += `<p class="text-red-600 text-sm mb-2">⚠ ${lc.error}</p>`;
+        document.getElementById("resultBox").innerHTML = `<div class="bg-white shadow rounded-xl p-6">${errorMsg}<p class="text-sm text-gray-500 mt-2">Please check the usernames and try again.</p></div>`;
+        return;
+    }
+
+            const ghLanguages = Object.entries(gh.languages)
+                .map(([lang, count]) => `<span class="inline-block bg-blue-50 text-blue-700 text-xs font-medium px-2 py-1 rounded-full mr-2 mb-2">${lang}: ${count}</span>`)
+                .join("");
+
+            const lcSolved = lc.stats.acSubmissionNum;
+            const lcEasy = lcSolved.find(s => s.difficulty === "Easy").count;
+            const lcMedium = lcSolved.find(s => s.difficulty === "Medium").count;
+            const lcHard = lcSolved.find(s => s.difficulty === "Hard").count;
+            const lcTotal = lcSolved.find(s => s.difficulty === "All").count;
+
+            const kgNotebookRows = kg.notebooks.map(n => `
+                <tr class="border-t border-gray-100">
+                    <td class="py-2 px-3 text-sm text-gray-800">${n.title}</td>
+                </tr>
+            `).join("");
+
+            const kgDatasetRows = kg.datasets.map(d => `
+                <tr class="border-t border-gray-100">
+                    <td class="py-2 px-3 text-sm text-gray-800">${d.title}</td>
+                </tr>
+            `).join("");
+
+            const html = `
+                <div class="bg-white shadow rounded-xl p-6 mb-6">
+                    <div class="flex justify-between items-center cursor-pointer" onclick="toggleSection('ghDetails')">
+                        <h3 class="text-lg font-bold text-gray-800">🐙 GitHub — ${gh.username}</h3>
+                        <span class="text-blue-600 text-sm font-medium">View Details ▾</span>
+                    </div>
+                    <p class="text-sm text-gray-600 mt-3 mb-1"><strong>${gh.profile.name || "N/A"}</strong></p>
+                    <p class="text-sm text-gray-500 mb-3">${gh.profile.public_repos} public repos • ${gh.profile.followers} followers</p>
+                    <div>${ghLanguages}</div>
+
+                    <div id="ghDetails" class="hidden mt-4">
+                        <div class="flex gap-3 mb-3">
+                            <select id="ghSort" onchange="rerenderGithubTable()" class="text-sm border border-gray-300 rounded-lg px-3 py-1.5">
+                                <option value="date">Sort by: Last Updated</option>
+                                <option value="language">Sort by: Language</option>
+                            </select>
+                        </div>
+                        <table class="w-full text-left">
+                            <thead>
+                                <tr class="text-xs text-gray-400 uppercase">
+                                    <th class="py-2 px-3">Repo</th>
+                                    <th class="py-2 px-3">Language</th>
+                                    <th class="py-2 px-3">Last Updated</th>
+                                </tr>
+                            </thead>
+                            <tbody id="ghTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="bg-white shadow rounded-xl p-6 mb-6">
+                    <div class="flex justify-between items-center cursor-pointer" onclick="toggleSection('lcDetails')">
+                        <h3 class="text-lg font-bold text-gray-800">💻 LeetCode — ${lc.username}</h3>
+                        <span class="text-blue-600 text-sm font-medium">View Details ▾</span>
+                    </div>
+                    <p class="text-sm text-gray-600 mt-3 mb-3">${lcTotal} total solved</p>
+                    <div class="flex gap-4 mb-3">
+                        <span class="text-green-600 text-sm font-medium">Easy: ${lcEasy}</span>
+                        <span class="text-yellow-600 text-sm font-medium">Medium: ${lcMedium}</span>
+                        <span class="text-red-600 text-sm font-medium">Hard: ${lcHard}</span>
+                    </div>
+                    <p class="text-sm text-gray-500">🔥 Current streak: ${lc.streak.current_streak} days • Max streak: ${lc.streak.max_streak} days</p>
+
+                    <div id="lcDetails" class="hidden mt-4">
+                        <div class="flex gap-3 mb-3">
+                            <select id="lcSort" onchange="rerenderLeetcodeTable()" class="text-sm border border-gray-300 rounded-lg px-3 py-1.5">
+                                <option value="date">Sort by: Date Solved</option>
+                                <option value="topic">Sort by: Topic</option>
+                            </select>
+                            <select id="lcFilterTopic" onchange="rerenderLeetcodeTable()" class="text-sm border border-gray-300 rounded-lg px-3 py-1.5">
+                                <option value="">All Topics</option>
+                            </select>
+                        </div>
+                        <table class="w-full text-left">
+                            <thead>
+                                <tr class="text-xs text-gray-400 uppercase">
+                                    <th class="py-2 px-3">Problem</th>
+                                    <th class="py-2 px-3">Topics</th>
+                                    <th class="py-2 px-3">Solved On</th>
+                                </tr>
+                            </thead>
+                            <tbody id="lcTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="bg-white shadow rounded-xl p-6 mb-6">
+                    <div class="flex justify-between items-center cursor-pointer" onclick="toggleSection('kgDetails')">
+                        <h3 class="text-lg font-bold text-gray-800">📊 Kaggle — ${kg.username}</h3>
+                        <span class="text-blue-600 text-sm font-medium">View Details ▾</span>
+                    </div>
+                    <p class="text-sm text-gray-500 mt-3">${kg.notebook_count} notebooks • ${kg.dataset_count} datasets</p>
+
+                    <div id="kgDetails" class="hidden mt-4">
+                        <p class="text-xs text-gray-400 uppercase mb-2 px-3">Notebooks</p>
+                        <table class="w-full text-left mb-4">
+                            <tbody>${kgNotebookRows}</tbody>
+                        </table>
+                        <p class="text-xs text-gray-400 uppercase mb-2 px-3">Datasets</p>
+                        <table class="w-full text-left">
+                            <tbody>${kgDatasetRows}</tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="bg-white shadow rounded-xl p-6 mb-6">
+                    <h3 class="text-lg font-bold text-gray-800 mb-3">📈 Overall Balance</h3>
+                    <div id="performanceChart" style="height: 400px;"></div>
+                </div>
+                <div class="text-center mt-6">
+                    <button onclick="downloadReport()"
+                        class="bg-gray-800 text-white font-semibold px-6 py-3 rounded-lg hover:bg-gray-900 transition">
+                        ⬇ Download Report
+                    </button>
+                </div>
+            `;
+
+            document.getElementById("resultBox").innerHTML = html;
+            rerenderGithubTable();
+            rerenderLeetcodeTable();
+            populateTopicFilter();
+        }
+
+        window.downloadReport = function() {
+            alert("PDF download coming soon — this will generate a 1-page report of everything shown above.");
+        };
+
+        window.rerenderGithubTable = function() {
+            const sortBy = document.getElementById("ghSort").value;
+            let repos = [...currentData.github.repos];
+
+            if (sortBy === "date") {
+                repos.sort((a, b) => new Date(b.pushed_at || 0) - new Date(a.pushed_at || 0));
+            } else if (sortBy === "language") {
+                repos.sort((a, b) => (a.language || "zzz").localeCompare(b.language || "zzz"));
+            }
+
+            const rows = repos.map(r => `
+                <tr class="border-t border-gray-100">
+                    <td class="py-2 px-3 text-sm text-gray-800">${r.name}</td>
+                    <td class="py-2 px-3 text-sm text-gray-500">${r.language || "—"}</td>
+                    <td class="py-2 px-3 text-sm text-gray-500">${r.pushed_at ? r.pushed_at.split("T")[0] : "—"}</td>
+                </tr>
+            `).join("");
+
+            document.getElementById("ghTableBody").innerHTML = rows;
+        };
+
+        window.populateTopicFilter = function() {
+            const allTopics = new Set();
+            currentData.leetcode.recent_solved_problems.forEach(p => {
+                p.topics.forEach(t => allTopics.add(t));
+            });
+
+            const select = document.getElementById("lcFilterTopic");
+            const options = ['<option value="">All Topics</option>']
+                .concat([...allTopics].sort().map(t => `<option value="${t}">${t}</option>`));
+            select.innerHTML = options.join("");
+        };
+
+        window.rerenderLeetcodeTable = function() {
+            const sortBy = document.getElementById("lcSort").value;
+            const filterTopic = document.getElementById("lcFilterTopic").value;
+
+            let problems = [...currentData.leetcode.recent_solved_problems];
+
+            if (filterTopic) {
+                problems = problems.filter(p => p.topics.includes(filterTopic));
+            }
+
+            if (sortBy === "date") {
+                problems.sort((a, b) => b.timestamp - a.timestamp);
+            } else if (sortBy === "topic") {
+                problems.sort((a, b) => (a.topics[0] || "zzz").localeCompare(b.topics[0] || "zzz"));
+            }
+
+            const rows = problems.map(p => `
+                <tr class="border-t border-gray-100">
+                    <td class="py-2 px-3 text-sm text-gray-800">${p.title}</td>
+                    <td class="py-2 px-3 text-sm text-gray-500">${p.topics.length ? p.topics.join(", ") : "—"}</td>
+                    <td class="py-2 px-3 text-sm text-gray-500">${new Date(p.timestamp * 1000).toISOString().split("T")[0]}</td>
+                </tr>
+            `).join("");
+
+            document.getElementById("lcTableBody").innerHTML = rows || `<tr><td class="py-2 px-3 text-sm text-gray-400" colspan="3">No problems match this filter</td></tr>`;
+        };
+
+        function renderChart(data) {
+            const gh = data.github;
+            const lc = data.leetcode;
+            const kg = data.kaggle;
+
+            const lcTotal = lc.stats.acSubmissionNum.find(s => s.difficulty === "All").count;
+
+            const pieData = [
+                { name: "GitHub Repos", y: gh.profile.public_repos, rawLabel: "public repos" },
+                { name: "GitHub Languages", y: Object.keys(gh.languages).length, rawLabel: "languages used" },
+                { name: "LeetCode Solved", y: lcTotal, rawLabel: "problems solved" },
+                { name: "LeetCode Max Streak", y: lc.streak.max_streak, rawLabel: "day max streak" },
+                { name: "Kaggle Notebooks", y: kg.notebook_count, rawLabel: "notebooks" },
+                { name: "Kaggle Datasets", y: kg.dataset_count, rawLabel: "datasets" }
+            ];
+
+            Highcharts.chart('performanceChart', {
+                chart: {
+                    type: 'pie',
+                    options3d: {
+                        enabled: true,
+                        alpha: 55,
+                        beta: 0
+                    }
+                },
+                title: { text: null },
+                credits: { enabled: false },
+                tooltip: {
+                    formatter: function() {
+                        return `<b>${this.point.y} ${this.point.rawLabel}</b>`;
+                    }
+                },
+                plotOptions: {
+                    pie: {
+                        innerSize: 0,
+                        depth: 45,
+                        dataLabels: {
+                            enabled: true,
+                            format: '{point.name}'
+                        },
+                        point: {
+                            events: {
+                                click: function() {
+                                    this.slice();
+                                }
+                            }
+                        }
+                    }
+                },
+                series: [{
+                    name: 'Metrics',
+                    colorByPoint: true,
+                    data: pieData
+                }]
+            });
+        }
+
+        window.toggleSection = function(id) {
+            const el = document.getElementById(id);
+            el.classList.toggle("hidden");
+        };
+
+        window.loadHistory = function() {
+            auth.currentUser.getIdToken().then((idToken) => {
+                fetch("/history", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ token: idToken })
+                })
+                .then(response => response.json())
+                .then(reports => {
+                    renderHistoryList(reports);
+                    document.getElementById("historyModal").classList.remove("hidden");
+                });
+            });
+        };
+
+        window.closeHistory = function() {
+            document.getElementById("historyModal").classList.add("hidden");
+        };
+
+        function renderHistoryList(reports) {
+            if (reports.length === 0) {
+                document.getElementById("historyList").innerHTML = "<p class='text-sm text-gray-500'>No past reports yet.</p>";
+                return;
+            }
+
+            const rows = reports.map((r, i) => {
+                const gh = r.data.github;
+                const lc = r.data.leetcode;
+                const date = r.created_at ? new Date(r.created_at).toLocaleString() : "Unknown date";
+                return `
+                    <div class="border-b border-gray-100 py-3 cursor-pointer hover:bg-gray-50 px-2 rounded" onclick='openHistoryReport(${i})'>
+                        <p class="text-sm font-medium text-gray-800">${gh.username} • ${lc.username}</p>
+                        <p class="text-xs text-gray-400">${date}</p>
+                    </div>
+                `;
+            }).join("");
+
+            document.getElementById("historyList").innerHTML = rows;
+            window.historyReports = reports;
+        }
+
+        window.openHistoryReport = function(index) {
+            const report = window.historyReports[index];
+            closeHistory();
+            renderResults(report.data);
+            renderChart(report.data);
+        };
+    </script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <nav class="bg-white shadow-sm px-6 py-4 flex justify-between items-center">
+        <h1 class="text-lg font-bold text-gray-800">Profile Summarizer</h1>
+        <div class="flex items-center gap-4">
+            <span id="welcomeMsg" class="text-sm text-gray-500"></span>
+            <button onclick="loadHistory()"
+                class="text-sm bg-gray-100 text-gray-700 font-medium px-4 py-2 rounded-lg hover:bg-gray-200 transition">
+                📜 History
+            </button>
+            <button onclick="logOut()"
+                class="text-sm bg-gray-100 text-gray-700 font-medium px-4 py-2 rounded-lg hover:bg-gray-200 transition">
+                Log Out
+            </button>
+        </div>
+    </nav>
+
+    <main class="flex items-center justify-center py-12 px-4">
+        <div class="bg-white shadow-lg rounded-2xl p-8 w-full max-w-md">
+            <h2 class="text-xl font-bold text-gray-800 mb-1">Enter Your Profiles</h2>
+            <p class="text-sm text-gray-500 mb-6">Paste a username or full profile URL for each platform</p>
+
+            <form onsubmit="analyzeProfiles(event)">
+                <label class="block text-sm font-medium text-gray-700 mb-1">GitHub</label>
+                <input type="text" id="github" name="github" placeholder="username or github.com/username"
+                    class="w-full border border-gray-300 rounded-lg px-4 py-2 mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500">
+
+                <label class="block text-sm font-medium text-gray-700 mb-1">LeetCode</label>
+                <input type="text" id="leetcode" name="leetcode" placeholder="username or leetcode.com/u/username"
+                    class="w-full border border-gray-300 rounded-lg px-4 py-2 mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500">
+
+                <label class="block text-sm font-medium text-gray-700 mb-1">Kaggle</label>
+                <input type="text" id="kaggle" name="kaggle" placeholder="username or kaggle.com/username"
+                    class="w-full border border-gray-300 rounded-lg px-4 py-2 mb-6 focus:outline-none focus:ring-2 focus:ring-blue-500">
+
+                <button type="submit"
+                    class="w-full bg-blue-600 text-white font-semibold py-2.5 rounded-lg hover:bg-blue-700 transition">
+                    Proceed
+                </button>
+            </form>
+
+            <div id="resultBox" class="mt-6"></div>
+        </div>
+    </main>
+
+    <div id="historyModal" class="hidden fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl shadow-lg p-6 w-full max-w-lg max-h-[80vh] overflow-y-auto">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold text-gray-800">Your Past Reports</h3>
+                <button onclick="closeHistory()" class="text-gray-400 hover:text-gray-600">✕</button>
+            </div>
+            <div id="historyList"></div>
+        </div>
+    </div>
+</body>
+</html>
